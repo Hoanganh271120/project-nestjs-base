@@ -1,0 +1,254 @@
+image: node:16-alpine
+
+stages:
+  - code_scan
+  - test
+  - extract_version
+  - build_stage_kubix_dev
+  - build_stage_kubix_training
+  - build_prod_kubix_prod
+  - deploy_stage_kubix_dev
+  - deploy_stage_kubix_training
+  - deploy_prod_kubix_prod
+
+variables:
+  GIT_DEPTH: 1
+  GIT_STRATEGY: clone
+  NAMESPACE_DEV: 'sifudev'
+  NAMESPACE_PROD: 'sifuprd'
+  APP_NAME_DEV: '${APP_NAME}-dev'
+  HARBOR_DEV: 'harbor.dev.kubix.tm.com.my'
+  HARBOR_PROD: 'harbor.prod.kubix.tm.com.my'
+  IMAGE_KUBIXDEV: '${HARBOR_DEV}/${NAMESPACE_DEV}/${NAMESPACE_DEV}/${APP_NAME}-dev:${DOCKER_IMAGE_TAG}'
+  IMAGE_KUBIXTRAINING: '${HARBOR_DEV}/${NAMESPACE_DEV}/${NAMESPACE_DEV}/${APP_NAME}:${DOCKER_IMAGE_TAG}'
+  IMAGE_KUBIXPROD: '${HARBOR_PROD}/${NAMESPACE_PROD}/${NAMESPACE_PROD}/${APP_NAME}:${DOCKER_IMAGE_TAG}'
+
+include:
+  - '/ci-cd/.image_build_kaniko.yml'
+
+CodeScanning:
+  stage: code_scan
+  tags:
+    - sifu
+  allow_failure: true
+  artifacts:
+    paths:
+      - gl-sast-report.json
+  image: registry.gitlab.com/gitlab-org/security-products/analyzers/semgrep:2
+  variables:
+    SAST_EXCLUDED_PATHS: spec,test,tests,tmp,node_modules
+  script:
+    - /analyzer run
+  only:
+    - dev
+    - merge_requests
+
+Test:
+  stage: test
+  before_script:
+    - 'yarn global add jest@27.5.1'
+    - 'yarn global add jest-cli'
+    - 'yarn add ts-jest@next'
+    - 'yarn global add typescript@4.5.4'
+    - 'yarn global add ts-node@10.8.0'
+  script:
+    - export JWT_TOKEN_SECRET=$JWT_SECRET
+    - npm install --legacy-peer-deps
+    - npm run build
+    - npm run test
+    - jest --ci --reporters=default --reporters=jest-junit
+    - npm run test:cov
+  coverage: /All files[^|]*\|[^|]*\s+([\d\.]+)/
+  artifacts:
+    paths:
+      - junit.xml
+      - coverage/
+    when: always
+    reports:
+      junit:
+        - junit.xml
+  tags:
+    - sifu
+  environment:
+    name: development
+  only:
+    - dev
+    - merge_requests
+
+extract_version_package_json:
+  stage: extract_version
+  image:
+    name: docker.io/alpine:3
+    entrypoint: [""]
+  before_script:
+    - apk add --no-cache jq
+  script:
+    - export DOCKER_IMAGE_TAG=$(cat package.json | jq -r .version)
+    - echo $DOCKER_IMAGE_TAG
+    - echo "DOCKER_IMAGE_TAG=$DOCKER_IMAGE_TAG" >> extract.env
+  only:
+    - kubixdev
+    - stage
+    - master
+  tags:
+    - kubix
+  artifacts:
+    reports:
+      dotenv: extract.env
+
+# build and push docker image to the  harbor image repository project/namespace sifu-dev in kubix dev
+build_sifu_kubix_dev:
+  stage: build_stage_kubix_dev
+  extends:
+    - .docker_build_push_using_kaniko_template
+  variables:
+    DOCKER_REGISTRY_URL: '${HARBOR_DEV}'
+    DOCKER_REGISTRY_PROJECT: '${NAMESPACE_DEV}'
+    DOCKER_REGISTRY_USR: '${HARBOR_KUBIX_DEV_ROBOT_USER}'
+    DOCKER_REGISTRY_PWD: '${HARBOR_KUBIX_DEV_ROBOT_PASS}' #variable value should be inside gitlab variable settings
+    DOCKER_IMAGE_NAME: '${NAMESPACE_DEV}/${APP_NAME}-dev'
+  before_script:
+    - echo $DOCKER_IMAGE_TAG
+    - echo "DOCKER_IMAGE_TAG=$DOCKER_IMAGE_TAG" >> build.env
+    - cp $ENV_KUBIXDEV .env
+  only:
+    - kubixdev
+  tags:
+    - kubix
+  artifacts:
+    reports:
+      dotenv: build.env
+  needs: ["extract_version_package_json"]
+  dependencies:
+    - extract_version_package_json
+
+build_sifu_kubix_training:
+  stage: build_stage_kubix_training
+  extends:
+    - .docker_build_push_using_kaniko_template
+  variables:
+    DOCKER_REGISTRY_URL: '${HARBOR_DEV}'
+    DOCKER_REGISTRY_PROJECT: '${NAMESPACE_DEV}'
+    DOCKER_REGISTRY_USR: '${HARBOR_KUBIX_DEV_ROBOT_USER}'
+    DOCKER_REGISTRY_PWD: '${HARBOR_KUBIX_DEV_ROBOT_PASS}' #variable value should be inside gitlab variable settings
+    DOCKER_IMAGE_NAME: '${NAMESPACE_DEV}/${APP_NAME}'
+  before_script:
+    - echo $DOCKER_IMAGE_TAG
+    - echo "DOCKER_IMAGE_TAG=$DOCKER_IMAGE_TAG" >> build.env
+    - cp $ENV_STAGE .env
+  only:
+    - stage
+  tags:
+    - kubix
+  artifacts:
+    reports:
+      dotenv: build.env
+  needs: ["extract_version_package_json"]
+  dependencies:
+    - extract_version_package_json
+
+# build and push docker image to the  harbor image repository project/namespace sifu-dev in kubix dev
+build_sifu_kubix_prod:
+  stage: build_prod_kubix_prod
+  extends:
+    - .docker_build_push_using_kaniko_template
+  variables:
+    DOCKER_REGISTRY_URL: '${HARBOR_PROD}'
+    DOCKER_REGISTRY_PROJECT: '${NAMESPACE_PROD}'
+    DOCKER_REGISTRY_USR: '${HARBOR_KUBIX_PROD_ROBOT_USER}'
+    DOCKER_REGISTRY_PWD: '${HARBOR_KUBIX_PROD_ROBOT_PASS}' #variable value should be inside gitlab variable settings
+    DOCKER_IMAGE_NAME: '${NAMESPACE_PROD}/${APP_NAME}'
+  before_script:
+    - echo $DOCKER_IMAGE_TAG
+    - echo "DOCKER_IMAGE_TAG=$DOCKER_IMAGE_TAG" >> build.env
+    - cp $ENV_PROD .env
+  only:
+    - master
+  tags:
+    - kubix
+  artifacts:
+    reports:
+      dotenv: build.env
+  needs: ["extract_version_package_json"]
+  dependencies:
+    - extract_version_package_json
+
+deploy_sifu_kubix_dev:
+  stage: deploy_stage_kubix_dev
+  image:
+    name: bitnami/kubectl:latest
+    entrypoint: [""]
+  only:
+    - kubixdev
+  tags:
+    - kubix
+  before_script:
+    - kubectl config set-cluster k8s --server="$K8S_API_DEV"
+    - kubectl config set clusters.k8s.certificate-authority-data "$K8S_CA_DEV"
+    - kubectl config set-credentials gitlab --token="$K8S_TOKEN_DEV"
+    - kubectl config set-context default --cluster=k8s --user=gitlab
+    - kubectl config use-context default
+    - kubectl config set-context --current --namespace="$K8S_CLUSTER_DEV"
+  script:
+    - sed -i "s/<NAMESPACE>/${NAMESPACE_DEV}/g" k8s/${APP_NAME}-kubixdev-deployment.yml
+    - sed -i "s/<VERSION>/${DOCKER_IMAGE_TAG}/g" k8s/${APP_NAME}-kubixdev-deployment.yml
+    - kubectl apply -f k8s/${APP_NAME}-kubixdev-deployment.yml
+    - kubectl set image deployment/${APP_NAME_DEV} ${APP_NAME_DEV}=${IMAGE_KUBIXDEV} -n ${NAMESPACE_DEV}
+    - kubectl rollout restart deployment ${APP_NAME_DEV} -n ${NAMESPACE_DEV}
+  needs: ["build_sifu_kubix_dev"]
+  dependencies:
+    - build_sifu_kubix_dev
+
+deploy_sifu_kubix_training:
+  stage: deploy_stage_kubix_training
+  image:
+    name: bitnami/kubectl:latest
+    entrypoint: [""]
+  only:
+    - stage
+  tags:
+    - kubix
+  before_script:
+    - kubectl config set-cluster k8s --server="$K8S_API_DEV"
+    - kubectl config set clusters.k8s.certificate-authority-data "$K8S_CA_DEV"
+    - kubectl config set-credentials gitlab --token="$K8S_TOKEN_DEV"
+    - kubectl config set-context default --cluster=k8s --user=gitlab
+    - kubectl config use-context default
+    - kubectl config set-context --current --namespace="$K8S_CLUSTER_DEV"
+  script:
+    - sed -i "s/<NAMESPACE>/${NAMESPACE_DEV}/g" k8s/${APP_NAME}-dev-deployment.yml k8s/${APP_NAME}-dev-ingress.yml
+    - sed -i "s/<VERSION>/${DOCKER_IMAGE_TAG}/g" k8s/${APP_NAME}-dev-deployment.yml
+    - kubectl apply -f k8s/${APP_NAME}-dev-deployment.yml
+    - kubectl apply -f k8s/${APP_NAME}-dev-ingress.yml
+    - kubectl set image deployment/${APP_NAME} ${APP_NAME}=${IMAGE_KUBIXTRAINING} -n ${NAMESPACE_DEV}
+    - kubectl rollout restart deployment ${APP_NAME} -n ${NAMESPACE_DEV}
+  needs: ["build_sifu_kubix_training"]
+  dependencies:
+    - build_sifu_kubix_training
+
+deploy_sifu_kubix_prod:
+  stage: deploy_prod_kubix_prod
+  image:
+    name: bitnami/kubectl:latest
+    entrypoint: [""]
+  only:
+    - master
+  tags:
+    - kubix
+  before_script:
+    - kubectl config set-cluster k8s --server="$K8S_API_PROD"
+    - kubectl config set clusters.k8s.certificate-authority-data "$K8S_CA_PROD"
+    - kubectl config set-credentials gitlab --token="$K8S_TOKEN_PROD"
+    - kubectl config set-context default --cluster=k8s --user=gitlab
+    - kubectl config use-context default
+    - kubectl config set-context --current --namespace="$K8S_CLUSTER_PROD"
+  script:
+    - sed -i "s/<NAMESPACE>/${NAMESPACE_PROD}/g" k8s/${APP_NAME}-prod-deployment.yml k8s/${APP_NAME}-prod-ingress.yml
+    - sed -i "s/<VERSION>/${DOCKER_IMAGE_TAG}/g" k8s/${APP_NAME}-prod-deployment.yml
+    - kubectl apply -f k8s/${APP_NAME}-prod-deployment.yml
+    - kubectl apply -f k8s/${APP_NAME}-prod-ingress.yml
+    - kubectl set image deployment/${APP_NAME} ${APP_NAME}=${IMAGE_KUBIXPROD} -n ${NAMESPACE_PROD}
+    - kubectl rollout restart deployment ${APP_NAME} -n ${NAMESPACE_PROD}
+  needs: ["build_sifu_kubix_prod"]
+  dependencies:
+    - build_sifu_kubix_prod

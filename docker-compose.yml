@@ -1,0 +1,75 @@
+version: '3'
+services:
+  backend:
+    build: 
+      context: ./
+      dockerfile: Dockerfile
+    image: backend:latest
+    container_name: backend
+    environment:
+      PORT: '8989'
+      POSTGRES_USERNAME: 'postgres'
+      POSTGRES_PASSWORD: 'postgres'
+      POSTGRES_HOST: 'postgres'
+      POSTGRES_PORT: '5432'
+      POSTGRES_DATABASE: 'postgres'
+      REDIS_PORT: '6379'
+      REDIS_HOST: 'redis'
+      JWT_SECRET: 'tmrnd'
+    ports:
+      - "8989:8989"
+    volumes:
+      - ./logs:/usr/src/app/src/logs
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - tmrnd
+
+  # postgres database
+  postgres:
+    container_name: postgres
+    image: postgres
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=gateway
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres:/data/postgres
+    networks:
+      - tmrnd
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  #redis database
+  redis:
+    container_name: redis
+    image: redis:4-alpine
+    ports:
+      - "6379:6379"
+    networks:
+      - tmrnd
+    volumes:
+      - ./data/redis:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "redis_isready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  tmrnd:
+    driver: bridge
+
+volumes:
+  postgres:
+    driver: local
+  minio:
+    driver: local
